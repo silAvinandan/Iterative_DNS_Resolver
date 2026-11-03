@@ -171,4 +171,139 @@ void testCompressionEncoding() {
                 () -> DnsNameCodec.decode(data, 1)
         );
     }
+
+    @Test
+    void testRejectTruncatedLabel() {
+
+        byte[] data = {
+                0x03, 'w', 'w'
+        };
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DnsNameCodec.decode(data, 0)
+        );
+    }
+
+    @Test
+    void testRejectUnsupportedLabelEncoding() {
+
+        byte[] data1 = {
+                0x40, 0x00
+        };
+
+        byte[] data2 = {
+                (byte) 0x80, 0x00
+        };
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DnsNameCodec.decode(data1, 0)
+        );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DnsNameCodec.decode(data2, 0)
+        );
+    }
+
+    @Test
+    void testRejectEmptyInteriorLabel() {
+
+        ByteArrayOutputStream output =
+                new ByteArrayOutputStream();
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DnsNameCodec.encode(
+                        "example..com",
+                        output,
+                        new HashMap<>()
+                )
+        );
+    }
+
+    @Test
+    void testRejectLabelLongerThan63Bytes() {
+
+        String invalidLabel = "a".repeat(64);
+
+        ByteArrayOutputStream output =
+                new ByteArrayOutputStream();
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DnsNameCodec.encode(
+                        invalidLabel,
+                        output,
+                        new HashMap<>()
+                )
+        );
+    }
+
+    @Test
+    void testEncodeRootDomain() {
+
+        ByteArrayOutputStream output =
+                new ByteArrayOutputStream();
+
+        DnsNameCodec.encode(
+                ".",
+                output,
+                new HashMap<>()
+        );
+
+        assertArrayEquals(
+                new byte[]{0x00},
+                output.toByteArray()
+        );
+    }
+
+    @Test
+    void testAcceptMaximum255ByteDomain() {
+
+        String domain = String.join(".",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(61)
+        );
+
+        ByteArrayOutputStream output =
+                new ByteArrayOutputStream();
+
+        assertDoesNotThrow(
+                () -> DnsNameCodec.encode(
+                        domain,
+                        output,
+                        new HashMap<>()
+                )
+        );
+
+        assertEquals(255, output.size());
+    }
+
+    @Test
+    void testRejectDomainExceeding255Bytes() {
+
+        String domain = String.join(".",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(62)
+        );
+
+        ByteArrayOutputStream output =
+                new ByteArrayOutputStream();
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> DnsNameCodec.encode(
+                        domain,
+                        output,
+                        new HashMap<>()
+                )
+        );
+    }
+
 }
