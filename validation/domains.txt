@@ -1,0 +1,16 @@
+# name  type      -- one query per line; '#' starts a comment
+example.com        A
+example.org        A
+google.com         A
+cloudflare.com     AAAA
+gmail.com          MX
+cloudflare.com     TXT
+ietf.org           SOA
+microsoft.com      NS
+www.github.com     A
+www.wikipedia.org  A
+www.amazon.com     A
+bbc.co.uk          A
+nic.in             A
+# a name that does not exist (expect NXDOMAIN)
+this-name-should-not-exist-zz9.example.com  A
