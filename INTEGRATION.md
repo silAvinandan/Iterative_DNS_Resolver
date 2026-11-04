@@ -1,57 +1,49 @@
-# Integration notes (Member A)
+# Integration and live validation
 
-## Layout and what was done
-```
-src/main/java/dns/transport/   Member C's 8 files, byte-identical to what was received
-src/main/java/dns/resolver/    Member A: IterativeResolver, Resolution, Main, adapters, stand-in codec
-src/main/java/dns/wire/        EMPTY - put Member B's files here (see below)
-src/test/java/dns/transport/   C's TransportTests (plain main(), run manually)
-src/test/java/dns/resolver/    JUnit 5 tests (resolver, codec, and C's real transport over loopback)
-```
-Only `Transport.java` (the boundary) changed shape: it now receives the whole candidate list so
-C's `ServerSelector` ranks servers and C's retry rounds apply, instead of the resolver looping over
-servers itself. `TransportAdapter` connects it to `dns.transport.DnsTransport`:
-encodes the query (random transaction ID), passes IP literals as socket addresses, decodes the
-reply, and maps results/exceptions.
+## Current implementation
 
-## Merging Member B's codec (pending)
-Needed from B: the **source** of `DnsHeader`, `DnsQuestion`, `DnsResourceRecord`, `DnsNameCodec`,
-`DnsRdataCodec` (a file-tree screenshot does not show signatures) and the team `pom.xml`.
-The resolver only needs the `MessageCodec` interface:
-```java
-byte[] encodeQuery(int id, String qname, int qtype);        // iterative query, RD bit clear
-DnsWire.Message decode(byte[] packet) throws IOException;   // QR/AA/TC flags, rcode, 3 record sections
-```
-`DnsWire.Message` / `DnsWire.Record(name, type, ttl, data)` is the resolver's neutral model. RDATA text
-format the resolver expects: A dotted quad; AAAA textual; NS/CNAME absolute name with trailing dot;
-MX `"<pref> <name>"`; TXT quoted strings; SOA `"mname rname serial refresh retry expire minimum"`.
-Plan: write `BWireCodec implements MessageCodec` over B's classes, swap it into `Main`, keep
-`DnsWireCodec` only for tests, and add a test decoding B's captured fixtures
-(`fixtures/dns-response.hex`) through the resolver's model. B's tree shows no class that assembles a
-whole message (header + sections), so that assembly may live in this adapter.
+The integrated source tree contains:
 
-## Experiment settings (read before timing failure cases)
-C's retry loop makes a full round over ALL candidate servers per retry and doubles the timeout each
-round. Against 13 unreachable root servers with the defaults (2000 ms, 2 retries, backoff) one query
-takes about 13 x (2+4+8) = 182 s. For the "authoritative unreachable" and tuning experiments use e.g.
-`--timeout-ms 500 --retries 1 --no-backoff` (about 13 s), and report the settings used.
+- `dns.resolver`: iterative resolution, DNS server mode, CLI, and adapters.
+- `dns.transport`: UDP retry/timeout, server selection, and TCP fallback.
+- `dns.wire`: DNS wire-format codec and typed resource records.
+- `dns.cache`: positive and negative TTL-based caching and resolution-loop protection.
 
-## Observations on Member C's code (suggestions, nothing was changed)
-1. **IPv6 without a route** is retried every round (`Network is unreachable` is an `IOException`).
-   Suggest skipping retries for `NoRouteToHostException`, `PortUnreachableException` and
-   "network is unreachable" messages. The resolver already lists IPv4 first, and the selector penalises
-   failures, so the effect is small but visible in query counts.
-2. **`TransportException` carries no attempt count.** The adapter estimates `servers x (retries+1)` on
-   failure; adding an `attempts` field would make `packets_sent` exact.
-3. **Two classes named `DnsHeader`** (C's package-private one and B's `dns.wire.DnsHeader`). No compile clash
-   (different packages) but confusing; consider renaming C's to `TransportHeader`.
-4. `TransportTests` is a `main()` program, so `mvn test` skips it; wrapping it in JUnit would let CI run it.
-5. `TransportException` has no `serialVersionUID` (compiler warning); C's README is empty.
-6. Replies are accepted on ID + QR only (the connected UDP socket already filters the source); comparing
-   the question section too would be a cheap hardening step.
-7. After a TC=1 reply the selector records a success for the UDP exchange even if the TCP retry then fails.
+The client-facing server is `dns.resolver.DnsServerMain`. It listens on UDP and TCP port 5353 by default, or on the port supplied as its first argument. The server uses the iterative resolver and shared in-memory cache. It supports IN queries for A, AAAA, NS, CNAME, MX, TXT, and SOA.
 
-## Open items
-- Merge B's codec (above) and D's cache layer; re-run `mvn clean package` and `validation/validate.sh`
-  on the merged result.
-- Merge this `pom.xml` into the team pom (JUnit 5, surefire, `mainClass dns.resolver.Main`); keep one pom.
+## Live validation record
+
+- Date: 2026-11-04 (Asia/Calcutta)
+- Environment: Windows, JDK 22.0.1, Maven 3.10.0
+- Branch and commit tested: `integration-stage-1`, `92334b4`
+- Upstream network: direct UDP and TCP DNS connectivity to public root infrastructure was available.
+- `dig`: not used; the local server was queried with a DNS wire-format probe over sockets.
+
+### Build and unit tests
+
+Command: `mvn clean test` (Maven local repository redirected to a writable project workspace because the default `.m2` repository lock could not be opened).
+
+Result: **BUILD SUCCESS — 141 tests, 0 failures, 0 errors, 0 skipped.** The existing tests were preserved. `TransportAdapterTest` exercises UDP and a UDP TC=1 response followed by a successful upstream TCP exchange.
+
+### Client-facing server checks
+
+Started with `dns.resolver.DnsServerMain` on port 15354 for the harness run.
+
+| Check | Observed result |
+|---|---|
+| UDP `example.com A` | NOERROR, two answers |
+| TCP `example.com A` | NOERROR, two answers |
+| Repeated positive query | Served from positive cache; cache entry count was 1 |
+| Unique `*.invalid A` | NXDOMAIN with one SOA authority record on the initial response |
+| Repeated negative query | Served from negative cache; negative cache entry count was 1 |
+| Cache hit ratio | 0.60 over five queries (two initial misses and three repeated positive/negative hits) |
+
+A cached negative answer contains NXDOMAIN but does not carry the original SOA authority record; the negative cache entry is based on the SOA TTL and minimum from the upstream response.
+
+### Failure diagnosis
+
+The reported live server query failure **did not reproduce** in this checkout. A fresh local server process accepted both UDP and TCP client queries, returned valid response IDs and DNS response flags, and completed iterative lookups over live upstream DNS. Consequently, this run establishes no project code root cause to fix; no speculative source change was made. The server defaults to port 5353, so clients that assume port 53 must be given the configured port (for example, `dig @127.0.0.1 -p 5353 example.com`). If the failure persists in the target setup, its exact client command and observed error will be needed to distinguish a port/configuration issue from a different environment-specific failure.
+
+## Cross-check against `dig +trace`
+
+`validation/validate.sh` compares delegation chains and A/AAAA answers against `dig +trace`. It requires `dig` and a network that permits iterative DNS requests. Failure cases can take a long time with the default retry/backoff policy; use the documented tuning options when measuring unreachable-server behavior.

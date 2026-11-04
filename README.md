@@ -1,69 +1,53 @@
-# Iterative DNS Resolver — team repo (integration branch)
+# Iterative DNS Resolver
 
-An iterative DNS resolver written from raw sockets up: it starts at the root servers and follows
-referrals itself (root → TLD → authoritative) and never forwards to another resolver.
+An iterative DNS resolver that walks root, TLD, and authoritative servers directly. The project also includes a client-facing DNS server with UDP and TCP listeners and positive and negative response caching.
 
-| Package | Owner | Contents |
-|---|---|---|
-| `dns.resolver` | Member A (Avinandan) | iterative engine, CNAME chains, glue, failover, CLI, stand-in codec, adapters |
-| `dns.transport` | Member C | UDP retry/timeout, server ranking, TCP fallback (**files unchanged**) |
-| `dns.wire` | Member B | wire-format codec — **not merged yet**, see INTEGRATION.md |
-| caching server mode | Member D | not merged yet |
+## Build and tests
 
-## Build, test, run
 Requires JDK 17+ and Maven 3.8+.
+
 ```bash
-mvn clean package                    # compiles, runs the JUnit tests, builds target/dns-resolver-1.0.0.jar
+mvn clean test
+mvn package
+```
+
+The test suite includes wire-format and resolver tests, a local UDP/TCP transport adapter test, a UDP truncation test that verifies upstream TCP fallback, and cache tests.
+
+## Run the iterative resolver
+
+```bash
 java -jar target/dns-resolver-1.0.0.jar example.com A
 java -jar target/dns-resolver-1.0.0.jar gmail.com MX --stats
 ```
-Options: `--stats` (one machine-readable `STATS` line), `--timeout-ms N` (default 2000),
-`--retries N` (default 2), `--no-backoff`. See "Experiment settings" in INTEGRATION.md before timing
-failure cases.
 
-Member C's own test program (loopback fake server, not run by `mvn test`):
+Options include `--stats`, `--timeout-ms N` (default 2000), `--retries N` (default 2), and `--no-backoff`.
+
+## Run the local DNS server
+
 ```bash
-java -cp target/classes:target/test-classes dns.transport.TransportTests
+java -cp target/classes dns.resolver.DnsServerMain [port]
 ```
 
-## Resolver behaviour (Member A)
-- Root → TLD → authoritative walk, choosing the closest enclosing delegation.
-- **Two-level failover.** The transport (C) handles network failure: ranking, timeouts, retries, TCP.
-  The resolver judges the answer and, if a server gave an unusable one — SERVFAIL/REFUSED, lame
-  (AA=0, no answer, no referral), NXDOMAIN without AA, a referral that does not descend from the
-  current zone, or an undecodable reply — drops that server and asks the rest.
-- **Glue:** Additional-section addresses are trusted only if the NS name lies within the zone of the
-  server that sent the referral (the root is the parent of everything). Otherwise, or with no glue,
-  NS hostnames are resolved iteratively (first one that works). IPv4 candidates are listed before IPv6.
-- **CNAME chains** across zones; records already in the response are used, only the unresolved final
-  target is queried; loops and over-long chains detected; a CNAME-type query returns the alias itself.
-- Loop/depth protection: 32 hops/links, in-progress set for CNAME/NS recursion, visited zone@server set.
-- Stateless resolver (per-query context): one instance is safe for concurrent queries.
-- Server addresses are passed as IP literals only; the adapter refuses hostnames so no system name
-  lookup (`getaddrinfo`) can ever happen.
-- Per-resolution statistics (`Resolution.Stats`) and the delegation chain for comparison with `dig +trace`.
+The default listening port is **5353**. The server accepts DNS queries over both UDP and TCP on the selected port. For example, with `dig`:
 
-### STATS fields
-| field | meaning |
-|---|---|
-| `upstream_queries` | calls to the transport = DNS queries asked (compare with dig's "Received" lines) |
-| `packets_sent` | UDP datagrams + TCP connections actually sent (retries, failover, TCP fallback included) |
-| `failed_queries` / `timeouts` | transport calls where no server answered / of which due to timeout |
-| `unusable` | answers the resolver rejected |
-| `udp_sent`, `tcp_sent`, `transport_timeouts` | totals from C's `DnsTransport` counters |
-| `chain` | zones walked for the original name, e.g. `.>com.>example.com.` |
-
-## Validation against dig
 ```bash
-validation/validate.sh        # needs dig; use WSL on Windows
+dig @127.0.0.1 -p 5353 example.com A
+dig +tcp @127.0.0.1 -p 5353 example.com A
 ```
-Compares delegation chains (must match) and A/AAAA answers (may legitimately differ), records query
-counts and latency in `validation/results-<timestamp>/summary.md`. Record real observations in
-`validation/VALIDATION.md`.
 
-## Known limitations
-- Iterative engine only: no DNSSEC, EDNS, QNAME minimisation, DoT/DoH; it does not yet serve clients on port 53.
-- The response's question section is not compared with the query (transport checks ID + QR only).
-- Glue-less NS lookups ask for A records only.
-- Root hints are embedded (IANA set); refresh from the official file for long-term use.
-- Observed live: `bbc.co.uk` gives chain `. > uk. > bbc.co.uk.` (the `.uk` servers also serve `co.uk`).
+Use a port option with DNS clients when the server is not listening on their default port 53. Binding to port 53 may require elevated privileges on some systems. The server supports A, AAAA, NS, CNAME, MX, TXT, and SOA queries in class IN. Positive answers are cached according to their TTL. NXDOMAIN and authoritative NODATA results with SOA records are negatively cached using the smaller of the SOA TTL and SOA minimum.
+
+## Resolver behavior
+
+- Iterative root → TLD → authoritative resolution with closest-delegation selection.
+- UDP retries and upstream TCP fallback when a UDP response is truncated.
+- Failover when a server times out or returns an unusable response.
+- In-bailiwick glue validation and iterative resolution of glue-less name servers.
+- CNAME chains, loop/depth protection, positive and negative caching.
+- Per-resolution statistics and delegation paths with `--stats`.
+
+The resolver currently does not implement DNSSEC, EDNS, QNAME minimisation, DoT, or DoH. Root hints are embedded in the source. Glue-less name server lookups request A records only.
+
+## Validation
+
+The recorded clean build and local server checks are in [INTEGRATION.md](INTEGRATION.md). A live query failure was not reproducible during that run; the tested server returned valid UDP and TCP responses. See the integration notes for the exact commands and observed cache results.
