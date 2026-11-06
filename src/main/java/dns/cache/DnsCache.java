@@ -22,6 +22,9 @@ public class DnsCache {
     private long hits = 0;
     private long misses = 0;
 
+    private long queryHits = 0;
+    private long queryMisses = 0;
+
     private record CacheEntry(
             List<DnsResourceRecord> records,
             long expiresAt
@@ -254,6 +257,18 @@ public class DnsCache {
         return (double) hits / total;
     }
 
+    public synchronized void recordQueryHit() {
+        queryHits++;
+    }
+
+    public synchronized void recordQueryMiss() {
+        queryMisses++;
+    }
+
+    public synchronized double getQueryHitRatio() {
+        long total = queryHits + queryMisses;
+        return total == 0 ? 0.0 : (double) queryHits / total;
+    }
     public synchronized int positiveCacheSize() {
         removeExpired();
         return positiveCache.size();
